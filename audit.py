@@ -5,11 +5,13 @@ from eval.extract import extract_answer, extract_answer_new
 from eval.score import score_model
 from eval.validate_answer import regenerate_test_questions
 from eval.validate_extract import count_extraction_changes, score_with_extractor
-from run_eval import load_jsonl, main
+from eval.validate_score import compare_overall_scores, compare_subset_scores
+from run_eval import load_jsonl
 
 ROOT = Path(__file__).resolve().parent
-REPORT = ROOT / "results" / "audit.md"
+REPORT_PATH = ROOT / "results" / "audit.md"
 MODELS = ("A", "B")
+EXAMPLE_IDS = {"A": ("q0002", "q0017"), "B": ("q0021", "q0022")}
 
 
 def model_outputs():
@@ -19,22 +21,23 @@ def model_outputs():
     }
 
 
-def update_section(markdown, heading, lines, end_heading=None):
-    """Replace a generated section only; leave all other Markdown content intact."""
-    rows = markdown.splitlines()
-    start = next((i for i, row in enumerate(rows) if row == heading), None)
+def append_report_section(heading, lines, next_heading=None):
+    """Append or replace one generated section without discarding other content."""
+    report = REPORT_PATH.read_text(encoding="utf-8") if REPORT_PATH.exists() else "# Evaluation audit\n"
+    rows = report.splitlines()
+    start = next((i for i, line in enumerate(rows) if line == heading), None)
     if start is None:
-        return markdown.rstrip() + "\n\n" + "\n".join(lines) + "\n"
-    if end_heading:
-        end = next((i for i in range(start + 1, len(rows)) if rows[i] == end_heading), len(rows))
+        rows += ([""] if rows else []) + lines
     else:
-        end = next((i for i in range(start + 1, len(rows)) if rows[i].startswith("## ")), len(rows))
-    return "\n".join(rows[:start] + lines + rows[end:]).rstrip() + "\n"
-
-
-def save_section(heading, lines, end_heading=None):
-    markdown = REPORT.read_text(encoding="utf-8") if REPORT.exists() else "# Evaluation audit\n"
-    REPORT.write_text(update_section(markdown, heading, lines, end_heading), encoding="utf-8")
+        end = next(
+            (i for i in range(start + 1, len(rows)) if rows[i] == next_heading),
+            len(rows),
+        ) if next_heading else next(
+            (i for i in range(start + 1, len(rows)) if rows[i].startswith("## ")),
+            len(rows),
+        )
+        rows[start:end] = lines
+    REPORT_PATH.write_text("\n".join(rows).rstrip() + "\n", encoding="utf-8")
 
 
 def markdown_cell(value):
@@ -42,6 +45,7 @@ def markdown_cell(value):
 
 
 def corrected_gold_labels():
+    """Regenerate proposed labels and report their effect on exact-match scores."""
     original_rows = load_jsonl("test_questions.jsonl")
     original = {row["id"]: row.copy() for row in original_rows}
     corrected_path = ROOT / "data" / "test_questions_correct.jsonl"
@@ -64,43 +68,53 @@ def corrected_gold_labels():
     lines += [
         f"| {m} | {before[m]['accuracy']:.1%} | {after[m]['accuracy']:.1%} | "
         f"{(after[m]['accuracy'] - before[m]['accuracy']) * 100:+.1f} pp | "
-        f"{after[m]['n_scored']} | {after[m]['n_unparseable']} |" for m in MODELS
+        f"{after[m]['n_scored']} | {after[m]['n_unparseable']} |"
+        for m in MODELS
     ]
-    old_gap = before["B"]["accuracy"] - before["A"]["accuracy"]
-    new_gap = after["B"]["accuracy"] - after["A"]["accuracy"]
-    lines += ["", "The updated labels are taken from `data/test_questions_correct.jsonl`.", "",
-              f"B−A accuracy gap: {old_gap * 100:.1f} pp before corrections and {new_gap * 100:.1f} pp after corrections.",
-              "", "## Changed labels", "", "| Question ID | Old gold | Updated gold |", "|---|---:|---:|"]
+    gap_before = before["B"]["accuracy"] - before["A"]["accuracy"]
+    gap_after = after["B"]["accuracy"] - after["A"]["accuracy"]
+    lines += [
+        "", "The updated labels are taken from `data/test_questions_correct.jsonl`.", "",
+        f"B−A accuracy gap: {gap_before * 100:.1f} pp before corrections and {gap_after * 100:.1f} pp after corrections.",
+        "", "## Changed labels", "", "| Question ID | Old gold | Updated gold |", "|---|---:|---:|",
+    ]
     lines += [f"| {qid} | {original[qid]['gold_answer']} | {corrected[qid]['gold_answer']} |" for qid in edits]
     lines.append("")
-    save_section("# Gold-label correction audit", lines, "## Responses affected by extractor update")
+    append_report_section("# Gold-label correction audit", lines, "## Responses affected by extractor update")
 
 
 def report_extraction_changes():
+    """Report changed extraction counts, all changed IDs, and selected examples."""
     outputs = model_outputs()
     changes = {m: count_extraction_changes(outputs[m], m) for m in MODELS}
     lines = [
         "## Responses affected by extractor update", "",
         "Counts compare numeric values returned by the old and new extractors.", "",
-        "| Model | Changed extractions | Total responses |", "|---|---:|---:|"]
+        "| Model | Changed extractions | Total responses |", "|---|---:|---:|---:|",
+    ]
     lines += [f"| {m} | {changes[m]['count']} | {len(outputs[m])} |" for m in MODELS]
     lines += ["", "### Changed response details", "", "| Model | ID | Old extraction | New extraction |", "|---|---|---:|---:|"]
-    lines += [f"| {m} | {item['id']} | {item['old_answer']} | {item['new_answer']} |"
-              for m in MODELS for item in changes[m]["details"]]
-    lines += ["", "### Representative raw-response examples", "",
-              "Examples show responses whose extracted values changed.", "",
-              "| Model | ID | Old extraction | New extraction | Raw response |", "|---|---|---:|---:|---|"]
-    examples = {"A": ("q0002", "q0017"), "B": ("q0021", "q0022")}
+    lines += [
+        f"| {m} | {item['id']} | {item['old_answer']} | {item['new_answer']} |"
+        for m in MODELS for item in changes[m]["details"]
+    ]
+    lines += [
+        "", "### Representative raw-response examples", "",
+        "Examples show responses whose extracted values changed.", "",
+        "| Model | ID | Old extraction | New extraction | Raw response |", "|---|---|---:|---:|---|",
+    ]
     lookup = {m: {item["id"]: item for item in changes[m]["details"]} for m in MODELS}
     lines += [
         f"| {m} | {qid} | {item['old_answer']} | {item['new_answer']} | {markdown_cell(item['response'])} |"
-        for m in MODELS for qid in examples[m] if (item := lookup[m].get(qid))
+        for m in MODELS for qid in EXAMPLE_IDS[m] if (item := lookup[m].get(qid))
     ]
     lines.append("")
-    save_section("## Responses affected by extractor update", lines, "## Extractor comparison on corrected gold labels")
+    append_report_section("## Responses affected by extractor update", lines,
+                          "## Extractor comparison on corrected gold labels")
 
 
 def compare_extractors():
+    """Compare old/new extractors on the corrected gold labels."""
     questions = {row["id"]: row for row in load_jsonl("test_questions_correct.jsonl")}
     outputs = model_outputs()
     scores = {
@@ -111,20 +125,79 @@ def compare_extractors():
     lines = [
         "## Extractor comparison on corrected gold labels", "",
         "Both extractors are scored against the corrected gold labels; unparseable outputs are skipped by the existing scorer.", "",
-        "| Model | Extractor | Accuracy | Correct | Scored | Unparseable |", "|---|---|---:|---:|---:|---:|"]
-    for m in MODELS:
-        lines += [f"| {m} | {label} | {r['accuracy']:.1%} | {r['correct']} | {r['n_scored']} | {r['n_unparseable']} |"
-                  for label, r in scores[m].items()]
-        old, new = scores[m]["old"], scores[m]["new"]
-        lines.append(f"| {m} | change (new − old) | {(new['accuracy'] - old['accuracy']) * 100:+.1f} pp | — | — | — |")
+        "| Model | Extractor | Accuracy | Correct | Scored | Unparseable |", "|---|---|---:|---:|---:|---:|",
+    ]
+    for model in MODELS:
+        lines += [
+            f"| {model} | {label} | {result['accuracy']:.1%} | {result['correct']} | "
+            f"{result['n_scored']} | {result['n_unparseable']} |"
+            for label, result in scores[model].items()
+        ]
+        old, new = scores[model]["old"], scores[model]["new"]
+        lines.append(
+            f"| {model} | change (new − old) | "
+            f"{(new['accuracy'] - old['accuracy']) * 100:+.1f} pp | — | — | — |"
+        )
     old_gap = scores["B"]["old"]["accuracy"] - scores["A"]["old"]["accuracy"]
     new_gap = scores["B"]["new"]["accuracy"] - scores["A"]["new"]["accuracy"]
-    lines += ["", f"B−A gap: {old_gap * 100:.1f} pp with the old extractor; {new_gap * 100:.1f} pp with the new extractor ({(new_gap - old_gap) * 100:+.1f} pp change).", ""]
-    save_section("## Extractor comparison on corrected gold labels", lines)
+    lines += [
+        "", f"B−A gap: {old_gap * 100:.1f} pp with the old extractor; "
+        f"{new_gap * 100:.1f} pp with the new extractor ({(new_gap - old_gap) * 100:+.1f} pp change).", "",
+    ]
+    append_report_section("## Extractor comparison on corrected gold labels", lines)
 
 
-if __name__ == "__main__":
+def report_exact_match_performance():
+    """Add clear overall and subset tables from both score comparison functions."""
+    questions = {row["id"]: row for row in load_jsonl("test_questions_correct.jsonl")}
+    outputs = model_outputs()
+    overall = compare_overall_scores(outputs, questions)
+    subsets = compare_subset_scores(outputs, questions)
+    lines = [
+        "## Exact-match scoring breakdown", "",
+        "Scored against `test_questions_correct.jsonl`. Parseable-only accuracy excludes unparseable responses; the alternative counts them as incorrect.", "",
+        "### Overall results", "",
+        "| Model | Correct | Parseable | Unparseable | Total | Accuracy: parseable only | Accuracy: unparseable incorrect |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for model in MODELS:
+        parsed = overall[model]["parseable_only"]
+        all_counted = overall[model]["unparseable_incorrect"]
+        correct = round(parsed["accuracy"] * parsed["n_scored"])
+        lines.append(
+            f"| {model} | {correct} | {parsed['n_scored']} | {parsed['n_unparseable']} | "
+            f"{all_counted['n_scored']} | {parsed['accuracy']:.1%} | {all_counted['accuracy']:.1%} |"
+        )
+    gap_parseable = overall["B"]["parseable_only"]["accuracy"] - overall["A"]["parseable_only"]["accuracy"]
+    gap_all = overall["B"]["unparseable_incorrect"]["accuracy"] - overall["A"]["unparseable_incorrect"]["accuracy"]
+    lines += [
+        "", f"B−A gap: {gap_parseable * 100:+.1f} pp parseable-only; {gap_all * 100:+.1f} pp when unparseables count as incorrect.", "",
+        "### Results by benchmark subset", "",
+        "Each subset denominator includes every question in that subset. Category percentages use this denominator.", "",
+        "| Model | Subset | Denominator | Correct | Incorrect | Unparseable | Accuracy: parseable only | Accuracy: unparseable incorrect |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for model in MODELS:
+        for subset, result in sorted(subsets[model].items()):
+            rates = result["category_rates"]
+            lines.append(
+                f"| {model} | {subset} | {result['denominator']} | "
+                f"{result['correct']} ({rates['correct']:.1%}) | "
+                f"{result['incorrect']} ({rates['incorrect']:.1%}) | "
+                f"{result['unparseable']} ({rates['unparseable']:.1%}) | "
+                f"{result['accuracy_parseable_only']:.1%} | "
+                f"{result['accuracy_unparseable_incorrect']:.1%} |"
+            )
+    lines.append("")
+    append_report_section("## Exact-match scoring breakdown", lines)
+
+
+def main():
     corrected_gold_labels()
     report_extraction_changes()
     compare_extractors()
+    report_exact_match_performance()
 
+
+if __name__ == "__main__":
+    main()

@@ -39,7 +39,7 @@ B−A accuracy gap: 7.4 pp before corrections and 7.0 pp after corrections.
 Counts compare numeric values returned by the old and new extractors.
 
 | Model | Changed extractions | Total responses |
-|---|---:|---:|
+|---|---:|---:|---:|
 | A | 76 | 400 |
 | B | 49 | 400 |
 
@@ -198,3 +198,27 @@ Both extractors are scored against the corrected gold labels; unparseable output
 | B | change (new − old) | +10.8 pp | — | — | — |
 
 B−A gap: 7.0 pp with the old extractor; 3.1 pp with the new extractor (-3.9 pp change).
+
+## Exact-match scoring breakdown
+
+Scored against `test_questions_correct.jsonl`. Parseable-only accuracy excludes unparseable responses; the alternative counts them as incorrect.
+
+### Overall results
+
+| Model | Correct | Parseable | Unparseable | Total | Accuracy: parseable only | Accuracy: unparseable incorrect |
+|---|---:|---:|---:|---:|---:|---:|
+| A | 316 | 400 | 0 | 400 | 79.0% | 79.0% |
+| B | 311 | 379 | 21 | 400 | 82.1% | 77.8% |
+
+B−A gap: +3.1 pp parseable-only; -1.3 pp when unparseables count as incorrect.
+
+### Results by benchmark subset
+
+Each subset denominator includes every question in that subset. Category percentages use this denominator.
+
+| Model | Subset | Denominator | Correct | Incorrect | Unparseable | Accuracy: parseable only | Accuracy: unparseable incorrect |
+|---|---|---:|---:|---:|---:|---:|---:|
+| A | multi_step | 180 | 138 (76.7%) | 42 (23.3%) | 0 (0.0%) | 76.7% | 76.7% |
+| A | single_step | 220 | 178 (80.9%) | 42 (19.1%) | 0 (0.0%) | 80.9% | 80.9% |
+| B | multi_step | 180 | 113 (62.8%) | 46 (25.6%) | 21 (11.7%) | 71.1% | 62.8% |
+| B | single_step | 220 | 198 (90.0%) | 22 (10.0%) | 0 (0.0%) | 90.0% | 90.0% |
